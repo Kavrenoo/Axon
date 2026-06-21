@@ -15699,3 +15699,501 @@ table.insert(Axon._cleanupFns, function()
 	Axon._respawnEnabled    = false
 	Axon._respawnLastCFrame = nil
 end)
+
+
+-- ══════════════════════════════════════════════════════════
+-- Axon Nametag System  –  server-wide script-user detection
+-- ══════════════════════════════════════════════════════════
+
+task.spawn(function()
+	local Players    = Axon.Services.Players
+	local RunService = Axon.Services.RunService
+	local TweenSvc   = Axon.Services.TweenService
+	local HttpSvc    = Axon.Services.HttpService
+	local LP         = Axon.Services.Player
+
+	local BASE_URL   = "https://project-p5f7f.vercel.app/api/nametags"
+	local PLAYER_TTL = 30  -- seconds before a check-in is considered stale
+
+	local axonTags        = {}  -- [userId] = BillboardGui
+	local axonTagConns    = {}  -- [userId] = Heartbeat RBXScriptConnection
+	local otherAxonUsers  = {}  -- [tostring(userId)] = playerInfo  (active Axon users in server)
+	local defaultNTStates = {}  -- [userId] = original DisplayDistanceType
+	local axonNTEnabled   = true
+	local stopSync        = false
+
+	local Custom_Tags = {
+		[5712636024]  = {tagText = "Axon Owner", effect = "typing"},
+		[10420127706] = {tagText = "Axon Owner", effect = "typing"},
+		-- [UserId] = {tagText = "Custom Name", effect = "typing" | "glitch"}
+	}
+
+	-- ── Cached game name ───────────────────────────────────
+	local cachedGameName = nil
+	local function getGameName()
+		if cachedGameName then return cachedGameName end
+		local ok, result = pcall(function()
+			local info = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
+			return info and info.Name
+		end)
+		if ok and result then cachedGameName = result; return result end
+		return "Unknown"
+	end
+
+	-- ── Check in / keep-alive ──────────────────────────────
+	local function checkIn()
+		pcall(function()
+			local path = BASE_URL .. "/players/" .. tostring(game.PlaceId) .. "/" .. tostring(game.JobId) .. "/" .. tostring(LP.UserId) .. ".json"
+			request({
+				Url = path,
+				Method = "PUT",
+				Headers = {["Content-Type"] = "application/json"},
+				Body = HttpSvc:JSONEncode({
+					username    = LP.Name,
+					displayName = LP.DisplayName,
+					timestamp   = os.time(),
+					jobId       = tostring(game.JobId),
+					gameName    = getGameName()
+				})
+			})
+		end)
+	end
+
+	-- ── Hide the default Roblox nametag ────────────────────
+	local function hideDefaultNametag(char, userId)
+		pcall(function()
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum then
+				if userId and not defaultNTStates[userId] then
+					defaultNTStates[userId] = hum.DisplayDistanceType
+				end
+				hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			end
+			local head = char:FindFirstChild("Head")
+			if head then
+				for _, child in ipairs(head:GetChildren()) do
+					if child:IsA("BillboardGui") then child:Destroy() end
+				end
+				local conn = head.ChildAdded:Connect(function(child)
+					if child:IsA("BillboardGui") then child:Destroy() end
+				end)
+				task.delay(5, function() pcall(function() conn:Disconnect() end) end)
+			end
+		end)
+	end
+
+	-- ── Build the BillboardGui nametag ─────────────────────
+	local function createAxonTag(plr, head)
+		local customCfg    = Custom_Tags[plr.UserId]
+		local isDBUser     = otherAxonUsers[tostring(plr.UserId)]
+
+		-- Owners get a custom tag; any other detected Axon user gets "Axon User"
+		if not customCfg and not isDBUser then return nil end
+
+		pcall(function()
+			local hum = head.Parent and head.Parent:FindFirstChildOfClass("Humanoid")
+			if hum and not defaultNTStates[plr.UserId] then
+				defaultNTStates[plr.UserId] = hum.DisplayDistanceType
+			end
+		end)
+
+		local tagText   = customCfg and customCfg.tagText or "Axon User"
+		local tagEffect = customCfg and customCfg.effect  or "typing"
+
+		-- BillboardGui
+		local bill = Instance.new("BillboardGui")
+		bill.Name                = "AxonUserTag_" .. plr.UserId
+		bill.Active              = true
+		bill.AlwaysOnTop         = true
+		bill.ClipsDescendants    = false
+		bill.LightInfluence      = 1
+		bill.Size                = UDim2.fromOffset(250, 75)
+		bill.StudsOffsetWorldSpace = Vector3.new(0, 2.5, 0)
+		bill.ResetOnSpawn        = false
+		bill.Adornee             = head
+		bill.ZIndexBehavior      = Enum.ZIndexBehavior.Sibling
+		bill.Parent              = Axon.UI.ScreenGui
+
+		-- Frame
+		local frame = Instance.new("Frame")
+		frame.Name                   = "TagFrame"
+		frame.BackgroundColor3       = Color3.fromRGB(72, 0, 66)
+		frame.BackgroundTransparency = 0.25
+		frame.Size                   = UDim2.fromScale(1, 1)
+		frame.Parent                 = bill
+		local fCorner = Instance.new("UICorner")
+		fCorner.CornerRadius = UDim.new(0.4, 0); fCorner.Parent = frame
+
+		-- Background gradient (Axon purple)
+		local frameBG = Instance.new("UIGradient")
+		frameBG.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,   Color3.fromRGB(140, 0, 130)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(72,  0, 66)),
+			ColorSequenceKeypoint.new(1,   Color3.fromRGB(20,  0, 20))
+		})
+		frameBG.Parent = frame
+
+		-- Animated border
+		local stroke = Instance.new("UIStroke")
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		stroke.Color           = Color3.fromRGB(255, 255, 255)
+		stroke.Thickness       = 3
+		stroke.Parent          = frame
+		local strokeGrad = Instance.new("UIGradient")
+		strokeGrad.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0,   Color3.fromRGB(255, 255, 255)),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(140, 80,  200)),
+			ColorSequenceKeypoint.new(1,   Color3.fromRGB(255, 255, 255))
+		})
+		strokeGrad.Parent = stroke
+
+		-- Profile picture
+		local pfp = Instance.new("ImageLabel")
+		pfp.Name                   = "Pfp"
+		pfp.BackgroundColor3       = Color3.fromRGB(30, 30, 30)
+		pfp.BackgroundTransparency = 0
+		pfp.Position               = UDim2.fromScale(0.05, 0.167)
+		pfp.Size                   = UDim2.fromScale(0.215, 0.7)
+		pfp.ZIndex                 = 5
+		pfp.ScaleType              = Enum.ScaleType.Crop
+		pfp.Parent                 = frame
+		local pfpCorner = Instance.new("UICorner")
+		pfpCorner.CornerRadius = UDim.new(1, 0); pfpCorner.Parent = pfp
+		local pfpStroke = Instance.new("UIStroke")
+		pfpStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		pfpStroke.Color     = Color3.fromRGB(255, 255, 255)
+		pfpStroke.Thickness = 2; pfpStroke.Parent = pfp
+
+		task.spawn(function()
+			local ok, img = pcall(function()
+				return Players:GetUserThumbnailAsync(plr.UserId, Enum.ThumbnailType.AvatarBust, Enum.ThumbnailSize.Size100x100)
+			end)
+			if ok and img and pfp.Parent then pfp.Image = img end
+		end)
+
+		-- Tag name label (Fredoka)
+		local tagLbl = Instance.new("TextLabel")
+		tagLbl.Name                   = "TagText"
+		tagLbl.BackgroundTransparency = 1
+		tagLbl.FontFace               = Font.new("rbxasset://fonts/families/FredokaOne.json")
+		tagLbl.Position               = UDim2.fromScale(0.29955, 0)
+		tagLbl.Size                   = UDim2.fromScale(0.7, 0.5)
+		tagLbl.Text                   = tagText
+		tagLbl.TextColor3             = Color3.fromRGB(255, 255, 255)
+		tagLbl.TextSize               = 22
+		tagLbl.TextStrokeTransparency = 0
+		tagLbl.TextWrapped            = true
+		tagLbl.TextXAlignment         = Enum.TextXAlignment.Left
+		tagLbl.TextYAlignment         = Enum.TextYAlignment.Bottom
+		tagLbl.ZIndex                 = 6
+		tagLbl.Parent                 = frame
+
+		-- Text effect (owners only)
+		if customCfg then
+			task.spawn(function()
+				local fullText    = tagText
+				local cursor      = "|"
+				local blinkVis    = true
+				local glitchChars = "!@#$%^&*()_+-=[]{}|;:,.<>?/~`"
+
+				task.spawn(function()
+					while tagLbl.Parent do blinkVis = not blinkVis; task.wait(0.5) end
+				end)
+
+				if tagEffect == "typing" then
+					while tagLbl.Parent do
+						for i = 1, #fullText do
+							if not tagLbl.Parent then break end
+							tagLbl.Text = fullText:sub(1, i) .. cursor; task.wait(0.08)
+						end
+						if not tagLbl.Parent then break end
+						local t0 = tick()
+						while tick() - t0 < 5 do
+							if not tagLbl.Parent then break end
+							tagLbl.Text = fullText .. (blinkVis and cursor or ""); task.wait(0.05)
+						end
+						if not tagLbl.Parent then break end
+						for i = #fullText, 1, -1 do
+							if not tagLbl.Parent then break end
+							tagLbl.Text = fullText:sub(1, i) .. cursor; task.wait(0.08)
+						end
+						if not tagLbl.Parent then break end
+						local t1 = tick()
+						while tick() - t1 < 5 do
+							if not tagLbl.Parent then break end
+							tagLbl.Text = blinkVis and cursor or ""; task.wait(0.05)
+						end
+					end
+				elseif tagEffect == "glitch" then
+					while tagLbl.Parent do
+						tagLbl.Text = fullText
+						if math.random() < 0.04 then
+							local s = ""
+							for i = 1, #fullText do
+								local ch = fullText:sub(i, i)
+								if ch == " " then s = s .. " "
+								else local gc = math.random(1, #glitchChars); s = s .. glitchChars:sub(gc, gc) end
+							end
+							tagLbl.Text = s; task.wait(0.30); tagLbl.Text = fullText
+						elseif math.random() < 0.12 then
+							local s = fullText
+							for _ = 1, math.random(1, 2) do
+								local idx = math.random(1, #fullText)
+								local ch = s:sub(idx, idx)
+								if ch ~= " " then
+									local gc = math.random(1, #glitchChars)
+									s = s:sub(1, idx-1) .. glitchChars:sub(gc, gc) .. s:sub(idx+1)
+								end
+							end
+							tagLbl.Text = s; task.wait(0.15); tagLbl.Text = fullText
+						end
+						task.wait(0.18)
+					end
+				end
+			end)
+		end
+
+		-- Username label (ComicNeue)
+		local userLbl = Instance.new("TextLabel")
+		userLbl.Name                   = "NameText"
+		userLbl.BackgroundTransparency = 1
+		userLbl.FontFace               = Font.new("rbxasset://fonts/families/ComicNeueAngular.json")
+		userLbl.Position               = UDim2.fromScale(0.29955, 0.5)
+		userLbl.Size                   = UDim2.fromScale(0.7, 0.5)
+		userLbl.Text                   = "@" .. plr.Name
+		userLbl.TextColor3             = Color3.new(1, 1, 1)
+		userLbl.TextSize               = 16
+		userLbl.TextStrokeTransparency = 0
+		userLbl.TextWrapped            = true
+		userLbl.TextXAlignment         = Enum.TextXAlignment.Left
+		userLbl.TextYAlignment         = Enum.TextYAlignment.Top
+		userLbl.ZIndex                 = 6
+		userLbl.Parent                 = frame
+
+		-- Click-to-teleport overlay
+		local clickBtn = Instance.new("TextButton")
+		clickBtn.Name                   = "ClickTeleport"
+		clickBtn.BackgroundTransparency = 1
+		clickBtn.Text                   = ""
+		clickBtn.Size                   = UDim2.fromScale(1, 1)
+		clickBtn.Position               = UDim2.fromScale(0, 0)
+		clickBtn.ZIndex                 = 20
+		clickBtn.AutoButtonColor        = false
+		clickBtn.Parent                 = frame
+		clickBtn.MouseButton1Click:Connect(function()
+			pcall(function()
+				local tHRP = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+				local mHRP = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+				if tHRP and mHRP then
+					mHRP.CFrame = CFrame.new(
+						tHRP.Position - tHRP.CFrame.LookVector * 3,
+						tHRP.Position + tHRP.CFrame.LookVector
+					)
+				end
+			end)
+		end)
+
+		-- Heartbeat: spinning gradients + distance LOD
+		local hbConn = RunService.Heartbeat:Connect(function(dt)
+			if not bill.Parent then return end
+			pcall(function()
+				strokeGrad.Rotation = (strokeGrad.Rotation + 120 * dt) % 360
+				frameBG.Rotation    = (frameBG.Rotation    +  60 * dt) % 360
+				bill.Enabled        = axonNTEnabled
+				if plr.Character and plr.Character:FindFirstChild("Head") then
+					bill.Adornee = plr.Character.Head
+				end
+				if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+					and plr.Character and plr.Character:FindFirstChild("HumanoidRootPart") then
+					local dist  = (LP.Character.HumanoidRootPart.Position - plr.Character.HumanoidRootPart.Position).Magnitude
+					local isFar = dist > 50
+					tagLbl.Visible  = not isFar
+					userLbl.Visible = not isFar
+					TweenSvc:Create(bill, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{Size = isFar and UDim2.fromOffset(50, 50) or UDim2.fromOffset(250, 75)}):Play()
+					TweenSvc:Create(pfp,  TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+						{Position = isFar and UDim2.fromScale(0.1, 0.1)   or UDim2.fromScale(0.05, 0.167),
+						 Size     = isFar and UDim2.fromScale(0.8, 0.8)   or UDim2.fromScale(0.215, 0.7)}):Play()
+				end
+			end)
+		end)
+		axonTagConns[plr.UserId] = hbConn
+		return bill
+	end
+
+	-- ── Who should get a tag? ──────────────────────────────
+	local function shouldShowTag(plr)
+		return Custom_Tags[plr.UserId] or otherAxonUsers[tostring(plr.UserId)]
+	end
+
+	-- ── Fetch all active Axon users in this server ─────────
+	local function fetchOtherUsers()
+		pcall(function()
+			local path   = BASE_URL .. "/players/" .. tostring(game.PlaceId) .. "/" .. tostring(game.JobId) .. ".json"
+			local result = request({Url = path, Method = "GET"})
+			if not (result and result.Body and result.Body ~= "null") then return end
+
+			local ok, data = pcall(function() return HttpSvc:JSONDecode(result.Body) end)
+			if not (ok and data and type(data) == "table") then return end
+
+			local now, newOther = os.time(), {}
+			for uidStr, info in pairs(data) do
+				local uid = tonumber(uidStr)
+				if uid and uid ~= LP.UserId and type(info) == "table" then
+					if (now - (tonumber(info.timestamp) or 0)) <= PLAYER_TTL then
+						newOther[uidStr] = info
+					end
+				end
+			end
+			otherAxonUsers = newOther
+
+			-- Spawn tags for newly-seen players
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= LP and otherAxonUsers[tostring(plr.UserId)] and not axonTags[plr.UserId] then
+					if plr.Character and plr.Character:FindFirstChild("Head") then
+						task.spawn(function()
+							hideDefaultNametag(plr.Character, plr.UserId)
+							local bill = createAxonTag(plr, plr.Character.Head)
+							if bill then axonTags[plr.UserId] = bill end
+						end)
+					end
+				end
+			end
+
+			-- Remove tags for players who left the database
+			for uid, bill in pairs(axonTags) do
+				if not Custom_Tags[uid] and not otherAxonUsers[tostring(uid)] then
+					local hb = axonTagConns[uid]
+					if hb then hb:Disconnect() end
+					axonTagConns[uid] = nil
+					pcall(function() bill:Destroy() end)
+					axonTags[uid] = nil
+					local plr = Players:GetPlayerByUserId(uid)
+					if plr and plr.Character then
+						pcall(function()
+							local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+							if hum and defaultNTStates[uid] then hum.DisplayDistanceType = defaultNTStates[uid] end
+						end)
+					end
+					defaultNTStates[uid] = nil
+				end
+			end
+		end)
+	end
+
+	-- ── Handle a player joining / respawning ───────────────
+	local function onPlayerAdded(plr)
+		if plr == LP then return end
+		plr.CharacterAdded:Connect(function(char)
+			task.wait(0.5)
+			if not shouldShowTag(plr) then return end
+			hideDefaultNametag(char, plr.UserId)
+			local head = char:FindFirstChild("Head")
+			if head then
+				if axonTags[plr.UserId] then
+					axonTags[plr.UserId].Adornee = head
+					axonTags[plr.UserId].Enabled = axonNTEnabled
+				else
+					local bill = createAxonTag(plr, head)
+					if bill then axonTags[plr.UserId] = bill end
+				end
+			end
+		end)
+		if plr.Character then
+			task.spawn(function()
+				task.wait(0.1)
+				if not shouldShowTag(plr) then return end
+				local head = plr.Character and plr.Character:FindFirstChild("Head")
+				if head and not axonTags[plr.UserId] then
+					hideDefaultNametag(plr.Character, plr.UserId)
+					local bill = createAxonTag(plr, head)
+					if bill then axonTags[plr.UserId] = bill end
+				end
+			end)
+		end
+	end
+
+	-- ── Heartbeat: remove tags that no longer qualify ──────
+	local _ntHB = RunService.Heartbeat:Connect(function()
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LP and plr.Character then
+				local show   = shouldShowTag(plr)
+				local hasBill = axonTags[plr.UserId] and axonTags[plr.UserId].Parent
+				if not show and hasBill then
+					pcall(function() axonTags[plr.UserId]:Destroy(); axonTags[plr.UserId] = nil end)
+					pcall(function()
+						if axonTagConns[plr.UserId] then axonTagConns[plr.UserId]:Disconnect(); axonTagConns[plr.UserId] = nil end
+					end)
+					pcall(function()
+						local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+						if hum and defaultNTStates[plr.UserId] then hum.DisplayDistanceType = defaultNTStates[plr.UserId] end
+					end)
+				end
+			end
+		end
+	end)
+
+	-- ── Player-leaving cleanup ─────────────────────────────
+	local _plrRemConn = Players.PlayerRemoving:Connect(function(plr)
+		local uid = plr.UserId
+		pcall(function()
+			if plr.Character then
+				local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+				if hum and defaultNTStates[uid] then hum.DisplayDistanceType = defaultNTStates[uid] end
+			end
+		end)
+		if axonTags[uid]     then axonTags[uid]:Destroy();            axonTags[uid]     = nil end
+		if axonTagConns[uid] then axonTagConns[uid]:Disconnect();     axonTagConns[uid] = nil end
+		defaultNTStates[uid]              = nil
+		otherAxonUsers[tostring(uid)]     = nil
+	end)
+
+	-- ── Script unload cleanup ──────────────────────────────
+	local function cleanupNametags()
+		stopSync = true
+		pcall(function() _ntHB:Disconnect() end)
+		pcall(function() _plrRemConn:Disconnect() end)
+		-- Remove local player from database
+		pcall(function()
+			local path = BASE_URL .. "/players/" .. tostring(game.PlaceId) .. "/" .. tostring(game.JobId) .. "/" .. tostring(LP.UserId) .. ".json"
+			request({Url = path, Method = "DELETE", Headers = {["Content-Type"] = "application/json"}})
+		end)
+		-- Restore all default nametags
+		for uid, state in pairs(defaultNTStates) do
+			local plr = Players:GetPlayerByUserId(uid)
+			if plr and plr.Character then
+				pcall(function()
+					local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+					if hum then hum.DisplayDistanceType = state end
+				end)
+			end
+		end
+		-- Disconnect all heartbeat connections and destroy all billboards
+		for uid, conn in pairs(axonTagConns) do pcall(function() conn:Disconnect() end) end
+		table.clear(axonTagConns)
+		for uid, bill in pairs(axonTags) do pcall(function() if bill and bill.Parent then bill:Destroy() end end) end
+		table.clear(axonTags)
+	end
+	table.insert(Axon._cleanupFns, cleanupNametags)
+
+	LP.OnTeleport:Connect(cleanupNametags)
+	pcall(function() game:BindToClose(cleanupNametags) end)
+
+	-- ── Boot: check in, fetch, hook players, then poll ─────
+	checkIn()
+	fetchOtherUsers()
+	for _, plr in ipairs(Players:GetPlayers()) do onPlayerAdded(plr) end
+	Players.PlayerAdded:Connect(onPlayerAdded)
+
+	local counter = 0
+	while not stopSync do
+		task.wait(1)
+		if stopSync or not Axon.UI.ScreenGui or not Axon.UI.ScreenGui.Parent then break end
+		counter = counter + 1
+		if counter >= 25 and axonNTEnabled then
+			counter = 0
+			checkIn()
+			fetchOtherUsers()
+		end
+	end
+end)
