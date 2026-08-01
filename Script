@@ -2426,7 +2426,8 @@ do
 
 		local ord = 0
 		AnnHeader("News", ord) ord = ord + 1
-		AnnItem("Removed AntiVCB And Reanimation Due To Ak Library Being Removed",                                          ord) ord = ord + 1
+		AnnItem("Will Be Remaking Script Soon",                                          ord) ord = ord + 1
+		AnnItem("Removed Commands Due To Ak Library Being Removed",                                          ord) ord = ord + 1
 	end
 end
 
